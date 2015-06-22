@@ -45,6 +45,7 @@ import struct
 import os
 import logging
 import getopt
+import fnmatch
 
 
 def send_all(sock, data):
@@ -63,8 +64,12 @@ class ThreadingTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 
 
 class Socks5Server(SocketServer.StreamRequestHandler):
-    def handle_tcp(self, sock, remote):
+    def handle_tcp(self, sock, remote, tcp_head=None, socks5_head=None):
         try:
+            if tcp_head:
+                send_all(remote, tcp_head)
+                remote.recv(2)
+                send_all(remote, socks5_head)
             fdset = [sock, remote]
             while True:
                 r, w, e = select.select(fdset, [], [])
@@ -90,43 +95,99 @@ class Socks5Server(SocketServer.StreamRequestHandler):
     def handle(self):
         try:
             sock = self.connection
-            sock.recv(262)
+            data_first = sock.recv(262)
             sock.send("\x05\x00")
             data = self.rfile.read(4) or '\x00' * 4
             mode = ord(data[1])
             if mode != 1:
                 logging.warn('mode != 1')
                 return
-
+            socks5_head = data
             addrtype = ord(data[3])
             if addrtype == 1:
                 addr_ip = self.rfile.read(4)
+                socks5_head += addr_ip
                 addr = socket.inet_ntoa(addr_ip)
             elif addrtype == 3:
                 addr_len = self.rfile.read(1)
                 addr = self.rfile.read(ord(addr_len))
+                socks5_head += addr_len
+                socks5_head += addr
             elif addrtype == 4:
                 addr_ip = self.rfile.read(16)
                 addr = socket.inet_ntop(socket.AF_INET6, addr_ip)
+                socks5_head += addr_ip
             else:
                 logging.warn('addr_type not support')
                 # not support
                 return
             addr_port = self.rfile.read(2)
+            socks5_head += addr_port
             port = struct.unpack('>H', addr_port)
+            wall = use_shadowsocks(addr)
             try:
-                reply = "\x05\x00\x00\x01"
-                reply += socket.inet_aton('0.0.0.0') + struct.pack(">H", 2222)
-                self.wfile.write(reply)
-                # reply immediately
-                remote = socket.create_connection((addr, port[0]))
+                if wall:
+                    remote = socket.create_connection(('127.0.0.1', 1080))
+                else:
+                    # reply immediately
+                    reply = "\x05\x00\x00\x01"
+                    reply += socket.inet_aton('0.0.0.0') + struct.pack(">H", 2222)
+                    self.wfile.write(reply)
+                    remote = socket.create_connection((addr, port[0]))
                 logging.info('connecting %s:%d' % (addr, port[0]))
             except socket.error, e:
                 logging.warn(e)
                 return
-            self.handle_tcp(sock, remote)
+            if wall:
+                self.handle_tcp(sock, remote, data, socks5_head)
+            else:
+                self.handle_tcp(sock, remote)
         except socket.error, e:
             logging.warn(e)
+
+
+def match(s, pattern):
+    return fnmatch.fnmatch(s, pattern) or s == pattern[2:]
+
+
+def use_shadowsocks(addr):
+    walls = [
+        '*.google.com.hk',
+        '*.googleadsserving.cn',
+        '*.linkwithin.com',
+        '*.blogblog.com',
+        '*.googlecode.com',
+        '*.postrank.com',
+        '*.bloggerads.net',
+        '*.blogger.com',
+        '*.flickr.com',
+        '*.blogspot.com',
+        '*.cloford.com',
+        '*.quora.com',
+        '*.youtube.com',
+        '*.google-code-prettify.googlecode.com',
+        'onedrive.live.com',
+        '*.googleadservices.com',
+        '*.gravatar.com',
+        '*.gstatic.com',
+        '*.gmail.com',
+        '*.google.com',
+        '*.wikipedia.org',
+        '*.twitter.com',
+        'gist.github.com',
+        '*.autoproxy.org',
+        '*.appspot.com',
+        '*.googlecode.com',
+        '*.feedburner.com',
+        '*.ajax.googleapis.com',
+        '*.twimg.com',
+        '*.facebook.com',
+        '*.googleusercontent.com',
+        'ssl.gstatic.com',
+        'facebook.com',
+        'facebook.org',
+    ]
+    return any(match(addr, x) for x in walls)
 
 
 def main():
